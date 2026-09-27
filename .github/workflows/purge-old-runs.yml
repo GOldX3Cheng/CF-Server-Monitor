@@ -8,11 +8,15 @@ on:
         required: false
         default: '2'
   schedule:
-    - cron: '30 1 * * *'   # daily 01:30 UTC (Beijing 09:30), after sync-deploy
+    - cron: '37 1 * * *'   # daily 01:37 UTC (Beijing 09:37), after sync-deploy
 
 permissions:
   actions: write
   contents: read
+
+concurrency:
+  group: purge-old-runs
+  cancel-in-progress: false
 
 jobs:
   purge:
@@ -27,18 +31,22 @@ jobs:
           cutoff=$(date -u -d "-${DAYS} days" +%Y-%m-%dT%H:%M:%SZ)
           echo "Repo: ${{ github.repository }}"
           echo "Deleting runs created before ${cutoff} (older than ${DAYS} days)"
-          page=1
           deleted=0
-          while :; do
-            ids=$(gh api "repos/${{ github.repository }}/actions/runs?per_page=100&page=${page}" \
+          # 只拉第 1 页：每删一条列表就前移，翻页会漏删
+          for round in $(seq 1 200); do
+            ids=$(gh api "repos/${{ github.repository }}/actions/runs?per_page=100&page=1" \
                     --jq ".workflow_runs[] | select(.created_at < \"${cutoff}\") | .id")
             [ -z "$ids" ] && break
+            round_deleted=0
             for id in $ids; do
-              echo "  deleting run ${id}"
-              gh api -X DELETE "repos/${{ github.repository }}/actions/runs/${id}" \
-                && deleted=$((deleted+1)) \
-                || echo "    (skip ${id})"
+              if gh api -X DELETE "repos/${{ github.repository }}/actions/runs/${id}" >/dev/null 2>&1; then
+                round_deleted=$((round_deleted+1))
+                deleted=$((deleted+1))
+              else
+                echo "  (skip ${id})"
+              fi
             done
-            page=$((page+1))
+            # 本轮一条都没删掉（权限/状态异常）→ 退出，避免死循环
+            [ "$round_deleted" -eq 0 ] && break
           done
           echo "Done. Deleted ${deleted} run(s) older than ${DAYS} days."
